@@ -1,0 +1,35 @@
+﻿name: Build Old Tizen widget
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - name: Install build dependencies
+        run: |
+          npm --prefix mods install
+          npm --prefix legacy install
+      - name: Test the widget
+        run: npm --prefix legacy test
+      - name: Build the unsigned release package
+        run: npm --prefix legacy run build
+      - name: Upload package requiring signing
+        uses: actions/upload-artifact@v4
+        with:
+          name: TizenTube-old-tizen
+          path: artifacts/*/TizenTube-old-tizen-v*.zip
+          if-no-files-found: error

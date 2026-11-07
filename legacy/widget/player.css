@@ -1,0 +1,17 @@
+/* Preserve the host's layout/visibility for status detection. The shell owns
+   both the spinner and text, including the native low-memory text fallback. */
+yt-spinner, yt-spinner * { color: transparent !important; text-shadow: none !important; }
+yt-spinner > * { opacity: 0 !important; visibility: hidden !important; }
+yt-spinner * { -webkit-animation: none !important; animation: none !important; }
+
+/* Slightly rounded corners on the search page's on-screen keyboard buttons */
+ytlr-search-keyboard ytlr-button-renderer,
+ytlr-search-keyboard .ytlr-button-renderer,
+ytlr-keyboard ytlr-button-renderer,
+ytlr-search-bar ytlr-button-renderer {
+  border-radius: 8px !important;
+}
+ytlr-search-keyboard ytlr-button-renderer *,
+ytlr-keyboard ytlr-button-renderer * {
+  border-radius: 8px !important;
+}

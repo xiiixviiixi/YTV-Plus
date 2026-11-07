@@ -1,0 +1,679 @@
+import { configRead } from '../config.js';
+import Chapters from '../ui/chapters.js';
+import resolveCommand from '../resolveCommand.js';
+import { longPressData, MenuServiceItemRenderer, ShelfRenderer, TileRenderer, ButtonRenderer } from '../ui/ytUI.js';
+import { findFeedbackToken } from '../utils/innerTubeCalls.js';
+import { PatchSettings } from '../ui/customYTSettings.js';
+import { t } from 'i18next';
+import { getQueuedVideoId } from '../utils/videoCards.js';
+
+/**
+ * This is a minimal reimplementation of the following uBlock Origin rule:
+ * https://github.com/uBlockOrigin/uAssets/blob/3497eebd440f4871830b9b45af0afc406c6eb593/filters/filters.txt#L116
+ *
+ * This in turn calls the following snippet:
+ * https://github.com/gorhill/uBlock/blob/bfdc81e9e400f7b78b2abc97576c3d7bf3a11a0b/assets/resources/scriptlets.js#L365-L470
+ *
+ * Seems like for now dropping just the adPlacements is enough for YouTube TV
+ */
+const origParse = JSON.parse;
+JSON.parse = function () {
+  const r = origParse.apply(this, arguments);
+  try {
+    const adBlockEnabled = configRead('enableAdBlock');
+    const signinReminderEnabled = configRead('enableSigninReminder');
+
+    if (r?.playbackContext?.contentPlaybackContext) {
+      // Handle inline playback without ads
+      console.log(r.playbackContext.contentPlaybackContext);
+    }
+
+    if (r.adPlacements && adBlockEnabled) {
+      r.adPlacements = [];
+    }
+
+    // Also set playerAds to false, just incase.
+    if (r.playerAds && adBlockEnabled) {
+      r.playerAds = false;
+    }
+
+    // Also set adSlots to an empty array, emptying only the adPlacements won't work.
+    if (r.adSlots && adBlockEnabled) {
+      r.adSlots = [];
+    }
+
+    if (r.paidContentOverlay && !configRead('enablePaidPromotionOverlay')) {
+      r.paidContentOverlay = null;
+    }
+
+    if (r?.streamingData?.adaptiveFormats && configRead('preferredVideoCodec') !== 'any') {
+      const preferredCodec = configRead('preferredVideoCodec');
+      const hasPreferredCodec = r.streamingData.adaptiveFormats.find(format => format.mimeType.includes(preferredCodec));
+      if (hasPreferredCodec) {
+        r.streamingData.adaptiveFormats = r.streamingData.adaptiveFormats.filter(format => {
+          if (format.mimeType.startsWith('audio/')) return true;
+          return format.mimeType.includes(preferredCodec);
+        });
+      }
+    }
+
+    // Drop "masthead" ad from home screen
+    if (
+      r?.contents?.tvBrowseRenderer?.content?.tvSurfaceContentRenderer?.content
+        ?.sectionListRenderer?.contents
+    ) {
+      if (!signinReminderEnabled) {
+        r.contents.tvBrowseRenderer.content.tvSurfaceContentRenderer.content.sectionListRenderer.contents =
+          r.contents.tvBrowseRenderer.content.tvSurfaceContentRenderer.content.sectionListRenderer.contents.filter(
+            (elm) => !elm.feedNudgeRenderer
+          );
+      }
+
+      if (adBlockEnabled) {
+        r.contents.tvBrowseRenderer.content.tvSurfaceContentRenderer.content.sectionListRenderer.contents =
+          r.contents.tvBrowseRenderer.content.tvSurfaceContentRenderer.content.sectionListRenderer.contents.filter(
+            (elm) => !elm.adSlotRenderer
+          );
+
+        for (const shelve of r.contents.tvBrowseRenderer.content.tvSurfaceContentRenderer.content.sectionListRenderer.contents) {
+          if (shelve.shelfRenderer && shelve.shelfRenderer.content?.horizontalListRenderer?.items) {
+            shelve.shelfRenderer.content.horizontalListRenderer.items =
+              shelve.shelfRenderer.content.horizontalListRenderer.items.filter(
+                (item) => !item.adSlotRenderer
+              );
+          }
+        }
+      }
+
+      processShelves(r.contents.tvBrowseRenderer.content.tvSurfaceContentRenderer.content.sectionListRenderer.contents);
+    }
+
+    if (
+      r?.contents?.tvBrowseRenderer?.content?.tvSurfaceContentRenderer?.content
+        ?.gridRenderer?.items
+    ) {
+      addLongPress(r.contents.tvBrowseRenderer.content.tvSurfaceContentRenderer.content.gridRenderer.items);
+    }
+
+    if (r.endscreen && configRead('enableHideEndScreenCards')) {
+      r.endscreen = null;
+    }
+
+    if (r.messages && Array.isArray(r.messages) && !configRead('enableYouThereRenderer')) {
+      r.messages = r.messages.filter(
+        (msg) => !msg?.youThereRenderer
+      );
+    }
+
+    // Remove shorts ads
+    if (!Array.isArray(r) && r?.entries && adBlockEnabled) {
+      r.entries = r.entries?.filter(
+        (elm) => !elm?.command?.reelWatchEndpoint?.adClientParams?.isAd
+      );
+    }
+
+    // Patch settings
+
+    if (r?.title?.runs) {
+      PatchSettings(r);
+    }
+
+    // DeArrow Implementation. I think this is the best way to do it. (DOM manipulation would be a pain)
+
+    if (r?.contents?.sectionListRenderer?.contents) {
+      processShelves(r.contents.sectionListRenderer.contents);
+    }
+
+    if (r?.continuationContents?.sectionListContinuation?.contents) {
+      processShelves(r.continuationContents.sectionListContinuation.contents);
+    }
+
+    if (r?.continuationContents?.horizontalListContinuation?.items) {
+      deArrowify(r.continuationContents.horizontalListContinuation.items);
+      hqify(r.continuationContents.horizontalListContinuation.items);
+      addLongPress(r.continuationContents.horizontalListContinuation.items);
+      r.continuationContents.horizontalListContinuation.items = hideVideo(r.continuationContents.horizontalListContinuation.items);
+    }
+
+    if (r?.continuationContents?.gridContinuation?.items) {
+      addLongPress(r.continuationContents.gridContinuation.items);
+    }
+
+    // Hide "Get YouTube Premium" from the sidebar/guide whenever it appears.
+    const stripPremium = (items) => {
+      if (!Array.isArray(items)) return;
+      for (let i = items.length - 1; i >= 0; i--) {
+        const item = items[i];
+        const entry = item?.guideEntryRenderer;
+        const title = entry?.formattedTitle?.simpleText || entry?.title?.simpleText || '';
+        const url = entry?.navigationEndpoint?.urlEndpoint?.url || '';
+        if (/premium/i.test(title) || /premium/i.test(url)) items.splice(i, 1);
+      }
+    };
+    if (r?.contents?.tvBrowseRenderer?.content?.tvSecondaryNavRenderer?.sections) {
+      for (let i = 0; i < r.contents.tvBrowseRenderer.content.tvSecondaryNavRenderer.sections.length; i++) {
+        const section = r.contents.tvBrowseRenderer.content.tvSecondaryNavRenderer.sections[i].tvSecondaryNavSectionRenderer;
+        if (!section) continue;
+        if (section.items) stripPremium(section.items);
+        if (!section.tabs) continue;
+
+        if (configRead('sortSubscriptionsByAlphabet')) {
+          section.tabs.sort((a, b) => {
+            if (a.tabRenderer.selected && !b.tabRenderer.selected) return -1;
+            if (!a.tabRenderer.selected && b.tabRenderer.selected) return 1;
+            return a.tabRenderer.title.localeCompare(b.tabRenderer.title);
+          });
+        }
+
+        for (let j = 0; j < section.tabs.length; j++) {
+          const tab = section.tabs[j];
+          const content = tab.tabRenderer.content?.tvSurfaceContentRenderer?.content;
+          if (content?.sectionListRenderer?.contents) {
+            const index = section.tabs.indexOf(tab);
+            const clone = content.sectionListRenderer.contents;
+            processShelves(clone);
+            section.tabs[index].tabRenderer.content.tvSurfaceContentRenderer.content.sectionListRenderer.contents = clone;
+          }
+          if (content?.gridRenderer?.items) {
+            addLongPress(content.gridRenderer.items);
+          }
+        }
+      }
+    }
+
+    if (r?.items) stripPremium(r.items);
+    const guideSection = r?.guideSections || r?.contents?.guideRenderer?.sections || r?.contents?.guideRenderer?.items;
+    if (Array.isArray(guideSection)) {
+      for (const s of guideSection) {
+        if (s?.guideSectionRenderer?.items) stripPremium(s.guideSectionRenderer.items);
+        if (s?.guideSectionRenderer?.originalItems) stripPremium(s.guideSectionRenderer.originalItems);
+      }
+    }
+
+    if (r?.contents?.singleColumnWatchNextResults?.pivot?.sectionListRenderer) {
+      if (configRead('hideRelatedVideosPlayer')) {
+        r.contents.singleColumnWatchNextResults.pivot.sectionListRenderer.contents = [{}]
+        r.contents.singleColumnWatchNextResults.pivot.sectionListRenderer.continuations = []
+      }
+      if (!signinReminderEnabled) {
+        r.contents.singleColumnWatchNextResults.pivot.sectionListRenderer.contents =
+          r.contents.singleColumnWatchNextResults.pivot.sectionListRenderer.contents.filter(
+            (elm) => !elm.alertWithActionsRenderer
+          );
+      }
+      processShelves(r.contents.singleColumnWatchNextResults.pivot.sectionListRenderer.contents, false);
+      if (window.queuedVideos.videos.length > 0) {
+        const queuedVideosClone = window.queuedVideos.videos.slice();
+        queuedVideosClone.unshift(TileRenderer(
+          'Clear Queue',
+          {
+            customAction: {
+              action: 'CLEAR_QUEUE'
+            }
+          }));
+        r.contents.singleColumnWatchNextResults.pivot.sectionListRenderer.contents.unshift(ShelfRenderer(
+          'Queued Videos',
+          queuedVideosClone,
+          Math.max(0, queuedVideosClone.findIndex(v => getQueuedVideoId(v) === window.queuedVideos.lastVideoId))
+        ));
+      }
+    }
+    /*
+   
+    Chapters are disabled due to the API removing description data which was used to generate chapters
+   
+    if (r?.contents?.singleColumnWatchNextResults?.results?.results?.contents && configRead('enableChapters')) {
+      const chapterData = Chapters(r);
+      r.frameworkUpdates.entityBatchUpdate.mutations.push(chapterData);
+      resolveCommand({
+        "clickTrackingParams": "null",
+        "loadMarkersCommand": {
+          "visibleOnLoadKeys": [
+            chapterData.entityKey
+          ],
+          "entityKeys": [
+            chapterData.entityKey
+          ]
+        }
+      });
+    }*/
+
+    // Manual SponsorBlock Skips
+
+    if (r?.playerOverlays?.playerOverlayRenderer) {
+      if (r.playerOverlays.playerOverlayRenderer.timelyActionRenderers) {
+        r.playerOverlays.playerOverlayRenderer.timelyActionRenderers =
+          r.playerOverlays.playerOverlayRenderer.timelyActionRenderers.filter(a => a.timelyActionRenderer.type !== 'TIMELY_ACTION_TYPE_SHOPPING' &&
+            a.timelyActionRenderer.type !== 'TIMELY_ACTION_TYPE_NFL_WATERMARK');
+      } else r.playerOverlays.playerOverlayRenderer.timelyActionRenderers = [];
+
+    }
+
+    if (r?.transportControls?.transportControlsRenderer?.promotedActions && configRead('enableSponsorBlockHighlight')) {
+      if (window?.sponsorblock?.segments) {
+        const category = window.sponsorblock.segments.find(seg => seg.category === 'poi_highlight');
+        if (category) {
+          r.transportControls.transportControlsRenderer.promotedActions.push({
+            type: 'TRANSPORT_CONTROLS_BUTTON_TYPE_SPONSORBLOCK_HIGHLIGHT',
+            button: {
+              buttonRenderer: ButtonRenderer(
+                false,
+                t('sponsorblock.toasts.skipToHighlight'),
+                'SKIP_NEXT',
+                {
+                  clickTrackingParams: null,
+                  customAction: {
+                    action: 'SKIP',
+                    parameters: {
+                      time: category.segment[0]
+                    }
+                  }
+                })
+            }
+          });
+        }
+      }
+    }
+
+    if (r?.contents?.tvBrowseRenderer?.content?.tvSurfaceContentRenderer?.header?.channelHeaderRenderer?.buttons) {
+      let browseId = null;
+      const title = r.contents.tvBrowseRenderer.content.tvSurfaceContentRenderer.header.channelHeaderRenderer.title.simpleText;
+      for (const service of r.responseContext.serviceTrackingParams) {
+        for (const param of service.params) {
+          if (param.key === 'browse_id') {
+            browseId = param.value;
+            break;
+          }
+        }
+        if (browseId) break;
+      }
+
+      const inSidebar = configRead('sidebarContentsOrder')?.some(orderItem =>
+        (typeof orderItem === 'object' ? orderItem.browseId : orderItem) === browseId);
+
+      r.contents.tvBrowseRenderer.content.tvSurfaceContentRenderer.header.channelHeaderRenderer.buttons.push({
+        buttonRenderer: ButtonRenderer(
+          false,
+          inSidebar ? t('settings.options.uiSettings.options.sortSidebarContents.removeFromSidebar') : t('settings.options.uiSettings.options.sortSidebarContents.addToSidebar'),
+          inSidebar ? 'REMOVE' : 'ADD',
+          {
+            customAction: {
+              action: 'ADD_OR_REMOVE_CHANNEL_TO_SIDEBAR',
+              parameters: {
+                browseId,
+                title
+              }
+            }
+          }
+        )
+      })
+    }
+  } catch (e) {
+    console.error('An error occured while processing the JSON:', e);
+  }
+
+  return r;
+};
+
+// Fix playback issues
+
+const origStringify = JSON.stringify;
+function copyableRecord(value) {
+  if (!value || typeof value !== 'object' || 'toJSON' in value || Object.prototype.hasOwnProperty.call(value, '__proto__')) return false;
+  const prototype = Object.getPrototypeOf(value);
+  return (prototype === null || Object.getPrototypeOf(prototype) === null) &&
+    Object.keys(value).every(key => Object.prototype.hasOwnProperty.call(Object.getOwnPropertyDescriptor(value, key), 'value'));
+}
+JSON.stringify = function (value, replacer, space) {
+  const playbackProperty = value && typeof value === 'object' && Object.getOwnPropertyDescriptor(value, 'playbackContext');
+  const playback = playbackProperty && playbackProperty.value;
+  const contextProperty = playback && typeof playback === 'object' && Object.getOwnPropertyDescriptor(playback, 'contentPlaybackContext');
+  const context = contextProperty && contextProperty.value;
+  const flag = context && typeof context === 'object' && Object.getOwnPropertyDescriptor(context, 'isInlinePlaybackNoAd');
+  if ((!flag || ('value' in flag && !flag.value)) && context && copyableRecord(value) && copyableRecord(playback) && copyableRecord(context)) {
+    const copiedContext = Object.assign({}, context, { isInlinePlaybackNoAd: true });
+    const copiedPlayback = Object.assign({}, playback, { contentPlaybackContext: copiedContext });
+    return origStringify.call(this, Object.assign({}, value, { playbackContext: copiedPlayback }), replacer, space);
+  }
+  return origStringify.call(this, value, replacer, space);
+};
+
+window.JSON.stringify = JSON.stringify;
+
+// Patch JSON.parse to use the custom one
+window.JSON.parse = JSON.parse;
+for (const key in window._yttv) {
+  if (window._yttv[key] && window._yttv[key].JSON && window._yttv[key].JSON.parse) {
+    window._yttv[key].JSON.parse = JSON.parse;
+  }
+}
+
+
+function processShelves(shelves, shouldAddPreviews = true) {
+  for (let shelfIndex = 0; shelfIndex < shelves.length; shelfIndex++) {
+    const shelve = shelves[shelfIndex];
+    if (shelve.shelfRenderer) {
+      if (!shelve.shelfRenderer.tvhtml5Style) shelve.shelfRenderer.tvhtml5Style = { effects: {} };
+      if (configRead('disableEnlargingThumbnails')) shelve.shelfRenderer.tvhtml5Style.effects.enlarge = false;
+      if (configRead('enableShrinkingThumbnails')) shelve.shelfRenderer.tvhtml5Style.effects.shrink = true;
+      if (!shelve.shelfRenderer.content?.horizontalListRenderer?.items) continue;
+      deArrowify(shelve.shelfRenderer.content.horizontalListRenderer.items);
+      hqify(shelve.shelfRenderer.content.horizontalListRenderer.items);
+      addLongPress(shelve.shelfRenderer.content.horizontalListRenderer.items);
+      if (shouldAddPreviews) {
+        addPreviews(shelve.shelfRenderer.content.horizontalListRenderer.items);
+      }
+      shelve.shelfRenderer.content.horizontalListRenderer.items = hideVideo(shelve.shelfRenderer.content.horizontalListRenderer.items);
+      if (!configRead('enableShorts')) {
+        if (shelve.shelfRenderer.tvhtml5ShelfRendererType === 'TVHTML5_SHELF_RENDERER_TYPE_SHORTS') {
+          shelves.splice(shelfIndex--, 1);
+          continue;
+        }
+        shelve.shelfRenderer.content.horizontalListRenderer.items = shelve.shelfRenderer.content.horizontalListRenderer.items.filter(item => item.tileRenderer?.tvhtml5ShelfRendererType !== 'TVHTML5_TILE_RENDERER_TYPE_SHORTS');
+        shelve.shelfRenderer.content.horizontalListRenderer.items = shelve.shelfRenderer.content.horizontalListRenderer.items.filter(item => item.lockupViewModel?.contentType !== 'LOCKUP_CONTENT_TYPE_SHORT');
+
+        shelve.shelfRenderer.content.horizontalListRenderer.items = shelve.shelfRenderer.content.horizontalListRenderer.items.filter(item => !item.tileRenderer?.onSelectCommand?.reelWatchEndpoint);
+      }
+    }
+  }
+}
+
+function addPreviews(items) {
+  if (!configRead('enablePreviews')) return;
+  for (const item of items) {
+    if (item.tileRenderer) {
+      const watchEndpoint = item.tileRenderer.onSelectCommand;
+      const copiedEndpoint = watchEndpoint;
+      if (item.tileRenderer?.onFocusCommand?.playbackEndpoint) continue;
+      if (item.tileRenderer?.onFocusCommand?.commandExecutorCommand) continue;
+      item.tileRenderer.onFocusCommand = {
+        startInlinePlaybackCommand: {
+          blockAdoption: true,
+          caption: false,
+          delayMs: 3000,
+          durationMs: 40000,
+          muted: false,
+          restartPlaybackBeforeSeconds: 10,
+          resumeVideo: true,
+          playbackEndpoint: copiedEndpoint
+        }
+      };
+    }
+  }
+}
+
+const brandingCache = new Map();
+const brandingRequests = new Map();
+const brandingQueue = [];
+let activeBranding = null;
+let brandingPumpTimer = null;
+
+function pumpBranding() {
+  if (activeBranding || !brandingQueue.length) return;
+  const entry = brandingQueue.shift();
+  activeBranding = entry;
+  const xhr = entry.xhr = new XMLHttpRequest();
+  xhr.open('GET', `https://sponsor.ajay.app/api/branding?videoID=${entry.videoID}`);
+  xhr.timeout = 10000;
+  xhr.responseType = 'json';
+  xhr.onload = () => {
+    const data = xhr.response;
+    entry.finish(xhr.status === 200 && data && Array.isArray(data.titles) && Array.isArray(data.thumbnails) ? data : null);
+  };
+  xhr.onerror = xhr.ontimeout = xhr.onabort = () => entry.finish(null);
+  xhr.send();
+}
+
+function scheduleBranding() {
+  if (brandingPumpTimer !== null) return;
+  brandingPumpTimer = setTimeout(() => { brandingPumpTimer = null; pumpBranding(); }, 0);
+}
+
+function getBranding(videoID) {
+  const cached = brandingCache.get(videoID);
+  if (cached && Date.now() - cached.at < 300000) return Promise.resolve(cached.data);
+  brandingCache.delete(videoID);
+  if (brandingRequests.has(videoID)) return brandingRequests.get(videoID).promise;
+  // Bound retained cards/promises before constructing any queued XHR.
+  if (brandingRequests.size >= 32) return Promise.resolve(null);
+  const entry = { videoID, xhr: null };
+  entry.promise = new Promise(resolve => {
+    entry.finish = data => {
+      if (brandingRequests.get(videoID) !== entry) return;
+      brandingRequests.delete(videoID);
+      clearTimeout(entry.deadline);
+      const index = brandingQueue.indexOf(entry);
+      if (index !== -1) brandingQueue.splice(index, 1);
+      if (activeBranding === entry) activeBranding = null;
+      if (data) {
+        if (brandingCache.size >= 128) brandingCache.delete(brandingCache.keys().next().value);
+        brandingCache.set(videoID, { at: Date.now(), data });
+      }
+      resolve(data);
+      scheduleBranding();
+    };
+  });
+  brandingRequests.set(videoID, entry);
+  entry.deadline = setTimeout(() => {
+    entry.finish(null);
+    if (entry.xhr) entry.xhr.abort();
+  }, 15000);
+  brandingQueue.push(entry);
+  scheduleBranding();
+  return entry.promise;
+}
+
+window.addEventListener('hashchange', () => {
+  Array.from(brandingRequests.values()).forEach(entry => {
+    entry.finish(null);
+    if (entry.xhr) entry.xhr.abort();
+  });
+});
+
+function deArrowify(items) {
+  for (let itemIndex = 0; itemIndex < items.length; itemIndex++) {
+    const item = items[itemIndex];
+    if (item.adSlotRenderer) {
+      items.splice(itemIndex--, 1);
+      continue;
+    }
+    if (!item.tileRenderer && !item.lockupViewModel) continue;
+    if (item.tileRenderer?.style !== 'TILE_STYLE_YTLR_DEFAULT' && item.lockupViewModel?.contentType !== 'LOCKUP_CONTENT_TYPE_VIDEO') continue;
+    if (configRead('enableDeArrow')) {
+      const videoID = item.tileRenderer ? item.tileRenderer.contentId : item.lockupViewModel.contentId;
+      getBranding(videoID).then(data => {
+        if (!data || !configRead('enableDeArrow')) return;
+        if (data.titles.length > 0) {
+          const mostVoted = data.titles.reduce((max, title) => max.votes > title.votes ? max : title);
+          item.tileRenderer ?
+            item.tileRenderer.metadata.tileMetadataRenderer.title.simpleText = mostVoted.title
+            : item.lockupViewModel.metadata.lockupMetadataViewModel.title.content = mostVoted.title;
+        }
+
+        if (data.thumbnails.length > 0 && configRead('enableDeArrowThumbnails')) {
+          const mostVotedThumbnail = data.thumbnails.reduce((max, thumbnail) => max.votes > thumbnail.votes ? max : thumbnail);
+          if (mostVotedThumbnail.timestamp) {
+            item.tileRenderer ?
+              item.tileRenderer.header.tileHeaderRenderer.thumbnail.thumbnails = [
+                {
+                  url: `https://dearrow-thumb.ajay.app/api/v1/getThumbnail?videoID=${videoID}&time=${mostVotedThumbnail.timestamp}`,
+                  width: 1280,
+                  height: 640
+                }
+              ] : item.lockupViewModel.contentImage.thumbnailViewModel.image.sources = [
+                {
+                  url: `https://dearrow-thumb.ajay.app/api/v1/getThumbnail?videoID=${videoID}&time=${mostVotedThumbnail.timestamp}`,
+                  width: 1280,
+                  height: 640
+                }
+              ]
+          }
+        }
+      }).catch(() => { });
+    }
+  }
+}
+
+
+function hqify(items) {
+  for (const item of items) {
+    if (!item.tileRenderer && !item.lockupViewModel) continue;
+    if (item?.tileRenderer?.style !== 'TILE_STYLE_YTLR_DEFAULT' && item?.lockupViewModel?.contentType !== 'LOCKUP_CONTENT_TYPE_VIDEO') continue;
+    if (configRead('enableHqThumbnails')) {
+      if (!item?.tileRenderer?.onSelectCommand?.watchEndpoint?.videoId && !item?.lockupViewModel?.contentId) continue;
+      if (!item?.tileRenderer?.header?.tileHeaderRenderer?.thumbnail?.thumbnails?.[0]?.url && !item?.lockupViewModel?.contentImage?.thumbnailViewModel?.image?.sources?.[0]?.url) continue;
+      const videoID = item.tileRenderer ? item.tileRenderer.onSelectCommand.watchEndpoint.videoId : item.lockupViewModel.contentId;
+      const queryArgs = item.tileRenderer ? item.tileRenderer.header.tileHeaderRenderer.thumbnail.thumbnails[0].url.split('?')[1] : item.lockupViewModel.contentImage.thumbnailViewModel.image.sources[0].url.split('?')[1];
+      item.tileRenderer ? item.tileRenderer.header.tileHeaderRenderer.thumbnail.thumbnails = [
+        {
+          url: `https://i.ytimg.com/vi/${videoID}/sddefault.jpg${queryArgs ? `?${queryArgs}` : ''}`,
+          width: 640,
+          height: 480
+        }
+      ] : item.lockupViewModel.contentImage.thumbnailViewModel.image.sources = [
+        {
+          url: `https://i.ytimg.com/vi/${videoID}/sddefault.jpg${queryArgs ? `?${queryArgs}` : ''}`,
+          width: 640,
+          height: 480
+        }
+      ];
+    }
+  }
+}
+
+function queueCard(item) {
+  if (item.tileRenderer) {
+    const r = item.tileRenderer;
+    return { tileRenderer: { contentId: r.contentId, style: r.style, metadata: r.metadata, header: r.header, onSelectCommand: r.onSelectCommand } };
+  }
+  const r = item.lockupViewModel;
+  return { lockupViewModel: { contentId: r.contentId, contentType: r.contentType, metadata: r.metadata, contentImage: r.contentImage,
+    rendererContext: { commandContext: { onTap: r.rendererContext?.commandContext?.onTap } } } };
+}
+
+function addLongPress(items) {
+  if (!configRead('enableLongPress')) return;
+  for (const item of items) {
+    if (!item.tileRenderer && !item.lockupViewModel) continue;
+    if (item?.tileRenderer?.style !== 'TILE_STYLE_YTLR_DEFAULT' && item?.lockupViewModel?.contentType !== 'LOCKUP_CONTENT_TYPE_VIDEO') continue;
+    if (item?.tileRenderer?.onLongPressCommand?.showMenuCommand?.menu?.menuRenderer?.items
+      || item?.lockupViewModel?.rendererContext?.commandContext?.onLongPress?.innertubeCommand?.showMenuCommand?.menu?.menuRenderer?.items) {
+      const menuItems = item.tileRenderer ? item.tileRenderer.onLongPressCommand.showMenuCommand.menu.menuRenderer.items
+        : item.lockupViewModel.rendererContext.commandContext.onLongPress.innertubeCommand.showMenuCommand.menu.menuRenderer.items;
+      if (menuItems.some(entry => entry.menuServiceItemRenderer?.serviceEndpoint?.playlistEditEndpoint?.customAction?.action === 'ADD_TO_QUEUE')) continue;
+      const copiedItem = queueCard(item);
+      const button = MenuServiceItemRenderer('Add to Queue', {
+        clickTrackingParams: null,
+        playlistEditEndpoint: {
+          customAction: {
+            action: 'ADD_TO_QUEUE',
+            parameters: copiedItem
+          }
+        }
+      })
+      menuItems.push(button);
+      restoreFeedbackMenuItems(item, menuItems);
+      continue;
+    }
+    if (!configRead('enableLongPress')) continue;
+    if (!item.tileRenderer?.metadata?.tileMetadataRenderer && !item.lockupViewModel?.metadata?.lockupMetadataViewModel) continue;
+    if (!item.tileRenderer?.header?.tileHeaderRenderer?.thumbnail?.thumbnails &&
+      !item.lockupViewModel?.contentImage?.thumbnailViewModel?.image?.sources) continue;
+    if (!item?.tileRenderer?.onSelectCommand?.watchEndpoint &&
+      !item?.lockupViewModel?.rendererContext?.commandContext?.onTap?.innertubeCommand?.watchEndpoint) continue;
+    const copiedItem = queueCard(item);
+    const subtitleNode = copiedItem?.tileRenderer ? copiedItem.tileRenderer.metadata?.tileMetadataRenderer?.lines?.[0]?.lineRenderer?.items?.[0]?.lineItemRenderer?.text :
+      copiedItem.lockupViewModel.metadata?.lockupMetadataViewModel?.metadata?.contentMetadataViewModel?.metadataRows?.[0]?.metadataParts?.[0]?.text?.content
+    ;
+    if (!subtitleNode) continue;
+    const subtitle = subtitleNode;
+    const data = longPressData({
+      videoId: copiedItem?.tileRenderer?.contentId || copiedItem?.lockupViewModel?.contentId,
+      thumbnails: copiedItem?.tileRenderer?.header?.tileHeaderRenderer?.thumbnail?.thumbnails || copiedItem?.lockupViewModel?.contentImage?.thumbnailViewModel?.image?.sources,
+      title: copiedItem?.tileRenderer?.metadata?.tileMetadataRenderer?.title?.simpleText || copiedItem?.lockupViewModel?.metadata?.lockupMetadataViewModel?.title?.content,
+      subtitle: subtitle.length && subtitle.length > 0 ? subtitle : subtitle.runs ? subtitle.runs[0].text : subtitle.simpleText,
+      watchEndpointData: copiedItem?.tileRenderer?.onSelectCommand?.watchEndpoint || copiedItem?.lockupViewModel?.rendererContext?.commandContext?.onTap?.innertubeCommand?.watchEndpoint,
+      item: copiedItem
+    });
+    restoreFeedbackMenuItems(item, data.showMenuCommand.menu.menuRenderer.items);
+    item.tileRenderer ? item.tileRenderer.onLongPressCommand = data
+    : item.lockupViewModel.rendererContext.commandContext.onLongPress = {
+      innertubeCommand: data
+    };
+  }
+}
+
+// YouTube moved the "Not interested" and "Don't recommend channel" items out of the
+// long press menu into an engagement panel (panelId + params) that has to be fetched
+// via /youtubei/v1/get_panel before the feedback tokens can be used. If the item
+// carries such a panel reference and the menu doesn't already contain feedback items,
+// add them back. The actual token fetching / feedback sending happens on click via
+// the NOT_INTERESTED / DONT_RECOMMEND_CHANNEL custom actions (see resolveCommand.js).
+function getFeedbackPanel(item) {
+  const onLongPress = item?.tileRenderer
+    ? item.tileRenderer.onLongPressCommand
+    : item?.lockupViewModel?.rendererContext?.commandContext?.onLongPress;
+  const endpoint = onLongPress?.showEngagementPanelEndpoint
+    ?? onLongPress?.innertubeCommand?.showEngagementPanelEndpoint;
+  if (endpoint?.identifier?.tag && endpoint?.globalConfiguration?.params) {
+    return {
+      panelId: endpoint.identifier.tag,
+      params: endpoint.globalConfiguration.params
+    };
+  }
+  return null;
+}
+
+function restoreFeedbackMenuItems(item, menuItems) {
+  const panel = getFeedbackPanel(item);
+  if (!panel || menuHasFeedbackItems(menuItems)) return;
+  for (const feedbackItem of feedbackMenuItems(panel)) {
+    menuItems.push(feedbackItem);
+  }
+}
+
+function menuHasFeedbackItems(menuItems) {
+  // Only look at the endpoints of the menu items themselves, not their
+  // parameters (which may embed a full copy of the video item).
+  return menuItems?.some((menuItem) =>
+    !!findFeedbackToken(menuItem?.menuServiceItemRenderer?.serviceEndpoint)
+      || !!findFeedbackToken(menuItem?.menuNavigationItemRenderer?.navigationEndpoint));
+}
+
+function feedbackMenuItems(panel) {
+  return [
+    MenuServiceItemRenderer(t('videoMenu.notInterested'), {
+      clickTrackingParams: null,
+      customAction: {
+        action: 'NOT_INTERESTED',
+        parameters: panel
+      }
+    }),
+    MenuServiceItemRenderer(t('videoMenu.dontRecommendChannel'), {
+      clickTrackingParams: null,
+      customAction: {
+        action: 'DONT_RECOMMEND_CHANNEL',
+        parameters: panel
+      }
+    })
+  ];
+}
+
+function hideVideo(items) {
+  if (!configRead('enableHideWatchedVideos')) return items;
+  return items.filter(item => {
+    if (!item.tileRenderer && !item.lockupViewModel) return true;
+    const progressBar = item?.tileRenderer ? item.tileRenderer.header?.tileHeaderRenderer?.thumbnailOverlays?.find(overlay => overlay.thumbnailOverlayResumePlaybackRenderer)?.thumbnailOverlayResumePlaybackRenderer
+    : item.lockupViewModel?.contentImage?.thumbnailViewModel?.overlays?.find(overlay => overlay.thumbnailBottomOverlayViewModel?.progressBar)?.thumbnailBottomOverlayViewModel?.progressBar. thumbnailOverlayProgressBarViewModel;
+    if (!progressBar) return true;
+    const pages = configRead('hideWatchedVideosPages');
+    if (!pages.length) return true;
+    const hash = location.hash.substring(1);
+    const pageName = hash === '/' ? 'home' : hash.startsWith('/search') ? 'search' : hash.split('?')[1]?.split('&')[0]?.split('=')[1]?.replace('FE', '')?.replace('topics_', '') ?? '';
+    if (!pages.includes(pageName)) return true;
+
+    const percentWatched = (progressBar?.percentDurationWatched ||
+      progressBar?.startPercent || 0);
+    return percentWatched <= configRead('hideWatchedVideosThreshold');
+  });
+}
