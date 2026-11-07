@@ -5,7 +5,7 @@
 <h1 align="center">YouTube TV+</h1>
 
 <p align="center">
-  YouTube with SponsorBlock, ad-blocking, and playback enhancements — running entirely on your Samsung TV (Tizen 2.4+).
+  YouTube with SponsorBlock, ad-blocking, and playback enhancements — running entirely on your Samsung TV.
 </p>
 
 <p align="center">
@@ -37,15 +37,6 @@
 | **DeArrow** | Removes clickbait titles/thumbnails |
 | **Auto Frame Rate** | Matches video frame rate |
 | **Quality Selector** | Preferred resolution preset |
-
----
-
-## Tested Devices
-
-| TV Model | Tizen | Firmware | Status |
-|----------|-------|----------|--------|
-| Samsung UE50KU6000 | 2.4.0 | T-JZL6DEUC-1260.1 | ✅ Verified |
-| Samsung UE32M5550AU | 3.0 | T-KTSDEUC | ✅ Verified |
 
 ---
 
