@@ -2,7 +2,7 @@
   "name": "youtube-tv-plus-legacy",
   "version": "1.0.0",
   "private": true,
-  "license": "GPL-3.0-only",
+  "license": "MIT",
   "scripts": {
     "build": "node build.js",
     "test": "node --test"
