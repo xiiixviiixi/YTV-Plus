@@ -83,9 +83,10 @@ npm run build
 
 ## Credits
 
-- Built by **The Standard Software Company**
-- SponsorBlock data from [sponsor.ajay.app](https://sponsor.ajay.app/)
-- Inspired by the Tizen homebrew community
+- **The Standard Software Company** — this build, packaging, and modifications
+- **reisxd / TizenTube** — original project ([github.com/reisxd/TizenTube](https://github.com/reisxd/TizenTube)), Tizen TV YouTube mod with SponsorBlock
+- **SponsorBlock** — segment data from [sponsor.ajay.app](https://sponsor.ajay.app/)
+- **Tizen homebrew community** — inspiration and tooling
 
 ---
 
@@ -93,8 +94,10 @@ npm run build
 
 GPL-3.0-only — see [LICENSE](LICENSE) and [third-party notices](legacy/THIRD_PARTY_NOTICES.txt).
 
+This project is a derivative work of TizenTube (GPL-3.0) and retains the same license.
+
 ---
 
 <p align="center">
-  <sub>An original project. Not a fork.</sub>
+  <sub>Based on <a href="https://github.com/reisxd/TizenTube">TizenTube</a> by reisxd.</sub>
 </p>
