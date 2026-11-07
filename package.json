@@ -8,5 +8,5 @@
     "test": "npm --prefix legacy test"
   },
   "author": "The Standard Software Company",
-  "license": "MIT"
+  "license": "GPL-3.0-only"
 }

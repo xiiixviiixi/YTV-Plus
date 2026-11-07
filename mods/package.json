@@ -9,7 +9,7 @@
   },
   "keywords": [],
   "author": "The Standard Software Company",
-  "license": "MIT",
+  "license": "GPL-3.0-only",
   "dependencies": {
     "@babel/preset-env": "^7.22.9",
     "@rollup/plugin-babel": "^6.0.3",

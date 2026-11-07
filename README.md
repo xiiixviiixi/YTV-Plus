@@ -91,7 +91,7 @@ npm run build
 
 ## License
 
-MIT — see [LICENSE](LICENSE) and [third-party notices](legacy/THIRD_PARTY_NOTICES.txt).
+GPL-3.0-only — see [LICENSE](LICENSE) and [third-party notices](legacy/THIRD_PARTY_NOTICES.txt).
 
 ---
 
