@@ -81,10 +81,22 @@ npm run build
 
 ---
 
+## About
+
+This is a **fork of [TizenTube](https://github.com/reisxd/TizenTube)** by **reisxd**, with visual and functional tweaks:
+
+- **16:9 launcher icon** (declared first in config.xml for proper TV tile display)
+- **Compressed icons** (16:9 and 1:1, much smaller file sizes)
+- **App ID aligned** to match installed app (`YtTvPlusTS.YTVP`)
+- **Widget ID** pointing to this repository
+- **Cleaned branding** — "YouTube TV+" throughout
+
+---
+
 ## Credits
 
-- **The Standard Software Company** — this build, packaging, and modifications
-- **reisxd / TizenTube** — original project ([github.com/reisxd/TizenTube](https://github.com/reisxd/TizenTube)), Tizen TV YouTube mod with SponsorBlock
+- **The Standard Software Company** — this fork, packaging, and tweaks
+- **reisxd / TizenTube** — original project ([github.com/reisxd/TizenTube](https://github.com/reisxd/TizenTube))
 - **SponsorBlock** — segment data from [sponsor.ajay.app](https://sponsor.ajay.app/)
 - **Tizen homebrew community** — inspiration and tooling
 
