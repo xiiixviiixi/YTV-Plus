@@ -1,4 +1,4 @@
-﻿name: Build Old Tizen widget
+name: Build Old Tizen widget
 
 on:
   workflow_dispatch:
@@ -30,6 +30,8 @@ jobs:
       - name: Upload package requiring signing
         uses: actions/upload-artifact@v4
         with:
-          name: TizenTube-old-tizen
-          path: artifacts/*/TizenTube-old-tizen-v*.zip
+          name: YouTube-TV-Plus
+          path: |
+            artifacts/YouTube-TV-Plus-unsigned.wgt
+            artifacts/YouTube-TV-Plus.zip
           if-no-files-found: error
